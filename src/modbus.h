@@ -70,8 +70,12 @@ MODBUS_BEGIN_DECLS
 #define MODBUS_FC_REPORT_SLAVE_ID           0x11
 #define MODBUS_FC_MASK_WRITE_REGISTER       0x16
 #define MODBUS_FC_WRITE_AND_READ_REGISTERS  0x17
+#define MODBUS_FC_MEI_MESSAGE				0x2B
 
 #define MODBUS_BROADCAST_ADDRESS    0
+
+/* Subfunction codes */
+#define MODBUS_SUB_FC_CANOPEN               0x0D
 
 /* Modbus_Application_Protocol_V1_1b.pdf (chapter 6 section 1 page 12)
  * Quantity of Coils to read (2 bytes): 1 to 2000 (0x7D0)
@@ -112,6 +116,12 @@ MODBUS_BEGIN_DECLS
 
 /* Random number to avoid errno conflicts */
 #define MODBUS_ENOBASE 112345678
+
+/* Encapsulated CANopen request Read/Write flag */
+enum {
+	MODBUS_CANOPEN_READ,
+	MODBUS_CANOPEN_WRITE
+};
 
 /* Protocol exceptions */
 enum {
@@ -216,6 +226,9 @@ MODBUS_API int modbus_write_and_read_registers(modbus_t *ctx, int write_addr, in
                                                const uint16_t *src, int read_addr, int read_nb,
                                                uint16_t *dest);
 MODBUS_API int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest);
+MODBUS_API int modbus_read_canopen(modbus_t *ctx, uint8_t node, uint16_t idx, uint8_t sub_idx, uint16_t nb, uint8_t *dest);
+MODBUS_API int modbus_write_canopen(modbus_t *ctx, uint8_t node, uint16_t idx, uint8_t sub_idx, uint16_t nb, uint8_t *src);
+
 
 MODBUS_API modbus_mapping_t* modbus_mapping_new_start_address(
     unsigned int start_bits, unsigned int nb_bits,

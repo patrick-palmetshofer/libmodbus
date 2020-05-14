@@ -155,6 +155,12 @@ static unsigned int compute_response_length_from_request(modbus_t *ctx, uint8_t 
     case MODBUS_FC_MASK_WRITE_REGISTER:
         length = 7;
         break;
+	case MODBUS_FC_MEI_MESSAGE:
+		length = 12;
+		if (req[offset + 2] == 0) {
+			length += (req[offset + 10] << 8 | req[offset + 11]);
+		}
+		break;
     default:
         length = 5;
     }
@@ -280,6 +286,9 @@ static uint8_t compute_meta_length_after_function(int function,
         case MODBUS_FC_MASK_WRITE_REGISTER:
             length = 6;
             break;
+		case MODBUS_FC_MEI_MESSAGE:
+			length = 11;
+			break;
         default:
             length = 1;
         }
@@ -313,7 +322,11 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
             function == MODBUS_FC_REPORT_SLAVE_ID ||
             function == MODBUS_FC_WRITE_AND_READ_REGISTERS) {
             length = msg[ctx->backend->header_length + 1];
-        } else {
+        } else if (function == MODBUS_FC_MEI_MESSAGE) {
+			if (msg[ctx->backend->header_length + 1] == MODBUS_SUB_FC_CANOPEN) {
+				length = msg[ctx->backend->header_length + 11]; //TODO concantenate this into 16 bit
+			}
+		} else {
             length = 0;
         }
     }
@@ -600,6 +613,11 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
             /* Report slave ID (bytes received) */
             req_nb_value = rsp_nb_value = rsp[offset + 1];
             break;
+		case MODBUS_FC_MEI_MESSAGE:
+			req_nb_value = (req[offset + 10] << 8) | req[offset + 11];
+			rsp_nb_value = (rsp[offset + 10] << 8) | rsp[offset + 11];
+			if (req[offset+2] == 0)
+				break;
         default:
             /* 1 Write functions & others */
             req_nb_value = rsp_nb_value = 1;
@@ -1557,6 +1575,94 @@ int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest)
     }
 
     return rc;
+}
+
+/* Creates a CANopen object dictionary access request through an encapsulated interface transport/MEI message */
+static int modbus_build_mei_canopen_request(modbus_t *ctx, uint16_t rw, uint8_t node, uint16_t idx, uint8_t sub_idx, uint16_t start_addr, uint16_t nb, uint8_t *req) {
+	int req_length;
+
+	//Increases the message ID counter and sets up the basic message. req[8] to req[11] have a different meaning with FC 0x2B and are filled with nonsense
+	req_length = ctx->backend->build_request_basis(ctx,
+								MODBUS_FC_MEI_MESSAGE,
+								0, 0, req);
+
+	if (req_length != 12) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	req[8]  = 0x0D;			//CANopen subfunction code for 0x2B encapsulated interface transport
+	req[9]  = rw & 0x00ff;		//Read/Write bit 1
+	req[10] = rw >> 8;	//Read/Write bit 2
+	req[11] = node;
+	req[12] = idx >> 8;
+	req[13] = idx & 0x00ff;
+	req[14] = sub_idx;
+	req[15] = start_addr >> 8;
+	req[16] = start_addr & 0x00ff;
+	req[17] = nb >> 8;
+	req[18] = nb & 0x00ff;
+
+	return 19;
+}
+
+/* Reads from the CANopen object dictionary using an encapsulated interface transport */
+int modbus_read_canopen(modbus_t *ctx, uint8_t node, uint16_t idx, uint8_t sub_idx, uint16_t nb, uint8_t *dest) {
+	int req_length;
+	int rc;
+	uint8_t req[MAX_MESSAGE_LENGTH];
+	uint8_t rsp[MAX_MESSAGE_LENGTH];
+
+	req_length = modbus_build_mei_canopen_request(ctx, MODBUS_CANOPEN_READ, node, idx, sub_idx, 0, nb, req);
+	rc = send_msg(ctx, req, req_length);
+	if (rc > 0) {
+		int offset;
+		int i;
+
+		rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+		if (rc == -1)
+			return -1;
+
+		rc = check_confirmation(ctx, req, rsp, rc);
+		if (rc == -1)
+			return -1;
+
+		offset = ctx->backend->header_length+12;
+		for (i = 0; i < rc; i++) {
+			if (ctx->debug) {
+				printf("%d\t%d\t%d\t%d\n", i, rc, offset, rsp[offset + i]);
+			}
+			dest[i] = rsp[offset+i];
+		}
+	}
+
+	return rc;
+}
+
+/* Writes to the CANopen object dictionary using an encapsulated interface transport */
+int modbus_write_canopen(modbus_t *ctx, uint8_t node, uint16_t idx, uint8_t sub_idx, uint16_t nb, uint8_t *src) {
+	int req_length;
+	int i;
+	int rc;
+	uint8_t req[MAX_MESSAGE_LENGTH];
+
+	req_length = modbus_build_mei_canopen_request(ctx, MODBUS_CANOPEN_WRITE, node, idx, sub_idx, 0, nb, req);
+	for (i = 0; i < nb; i++) {
+		req[req_length++] = src[i];
+	}
+
+	rc = send_msg(ctx, req, req_length);
+	if (rc > 0) {
+		uint8_t rsp[MAX_MESSAGE_LENGTH];
+
+		rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+		if (rc == -1)
+			return -1;
+
+		rc = check_confirmation(ctx, req, rsp, rc);
+	}
+
+	return rc;
 }
 
 void _modbus_init_common(modbus_t *ctx)
